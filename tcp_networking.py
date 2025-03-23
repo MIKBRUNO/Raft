@@ -62,6 +62,12 @@ class TcpNetwork(Network):
                 await asyncio.sleep(retry_policy())
 
 
-    def _handle_client_connected(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def _handle_client_connected(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         ip, port = writer.transport.get_extra_info("peername")
-        self._connections[TcpMember(ip, port)] = (reader, writer)
+        member = TcpMember(ip, port)
+        if member in self._other_members:
+            self._connections[TcpMember(ip, port)] = (reader, writer)
+        else:
+            reader.feed_eof()
+            writer.close()
+            await writer.wait_closed()
