@@ -1,6 +1,8 @@
 import asyncio
 import sys
 from networking import TcpNetwork, TcpMember
+from rpc import RPCManager, RPCCallable
+import json
 
 members = [TcpMember(address=('127.0.0.1', 4001)), TcpMember(address=('127.0.0.1', 4002)), TcpMember(address=('127.0.0.1', 4003))]
 i = input("1-3: ")
@@ -15,17 +17,21 @@ async def ainput(string: str) -> str:
     return await asyncio.get_event_loop().run_in_executor(
             None, sys.stdin.readline)
 
+async def handler(m: TcpMember, d: dict) -> dict:
+    print("from ", TcpMember, ": ", d)
+    return {"answer": "wowo"}
+
 async def main():
+    rpc = RPCManager(this, members, handler)
     try:
-        network = TcpNetwork(this, members, lambda m, b: print("from ", m, ": ", b))
-        network.set_connected_callback(lambda m: print("connected: ", m))
-        network.set_disconnected_callback(lambda m: print("disconnected: ", m))
         while True:
             i = await ainput("0-1: ")
+            cl = rpc.get_callable(members[int(i)])
             msg = await ainput("msg: ")
-            await network.send(members[int(i)], bytes(msg, encoding="UTF-8"))
+            msg_dict = json.loads(msg)
+            print("answer", await cl.call(msg_dict))
     finally:
-        await network.close()
+        await rpc.close()
 
 try:
     asyncio.run(main())

@@ -22,7 +22,7 @@ class NetworkMember(ABC):
 
 class Network(ABC):
     @abstractmethod
-    def __init__(self, member: NetworkMember, other_members: list[NetworkMember], recieved_callback: Callable[[NetworkMember, bytes], None | Awaitable]):
+    def __init__(self, member: NetworkMember, other_members: list[NetworkMember]):
         super().__init__()
 
 
@@ -31,15 +31,20 @@ class Network(ABC):
 
 
     @abstractmethod
-    def set_disconnected_callback(self, cb: Callable[[NetworkMember], None | Awaitable] | None) -> None: ...
+    def set_disconnected_callback(self, cb: Callable[[NetworkMember], Awaitable] | None) -> None: ...
+
+
+    @abstractmethod
+    def set_read_callback(self, cb: Callable[[NetworkMember, bytes], Awaitable] | None) -> None: ...
     
     
     @abstractmethod
-    def set_connected_callback(self, cb: Callable[[NetworkMember], None | Awaitable] | None) -> None: ...
+    def set_connected_callback(self, cb: Callable[[NetworkMember], Awaitable] | None) -> None: ...
 
 
     @abstractmethod
     async def send(self, member: NetworkMember, msg: bytes) -> None: ...
+
 
     @abstractmethod
     async def close(self) -> None: ...

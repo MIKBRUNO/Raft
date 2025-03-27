@@ -72,14 +72,14 @@ class TcpMember(NetworkMember):
 
 
 class TcpNetwork(Network):
-    def __init__(self, member: TcpMember, other_members: list[TcpMember], recieved_callback: Callable[[NetworkMember, bytes], None | Awaitable],
+    def __init__(self, member: TcpMember, other_members: list[TcpMember],
                        retry_connection_policy: Callable[[], float] = lambda: 5):
-        super().__init__(member, other_members, recieved_callback)
+        super().__init__(member, other_members)
         self._this = member
         self._other_members = other_members
-        self._recv_cb = recieved_callback
-        self._disconnected_cb: Callable[[NetworkMember], None | Awaitable] = None
-        self._connected_cb: Callable[[NetworkMember], None | Awaitable] = None
+        self._recv_cb: Callable[[NetworkMember, bytes], Awaitable] = None
+        self._disconnected_cb: Callable[[NetworkMember], Awaitable] = None
+        self._connected_cb: Callable[[NetworkMember], Awaitable] = None
         self._connections: dict[TcpMember, tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
         self._connection_tasks = set()
         self._reading_tasks = set()
@@ -148,22 +148,26 @@ class TcpNetwork(Network):
                 msg_len_bytes = await reader.readexactly(4)
                 msg_len = int.from_bytes(msg_len_bytes, byteorder="big", signed=False)
                 message = await reader.readexactly(msg_len)
-                cb_result = self._recv_cb(member, message)
-                if cb_result is Awaitable: await cb_result
+                if self._recv_cb:
+                    await self._recv_cb(member, message)
             except:
-                await self._handle_disconnected(member)
+                break
+        await self._handle_disconnected(member)
 
 
     async def _handle_disconnected(self, member: TcpMember):
         if member not in self._connections.keys():
             return
+        reader = self._connections[member][0]
         writer = self._connections[member][1]
         self._connections.pop(member)
-        writer.close()
-        await writer.wait_closed()
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except ConnectionError:
+            ...
         if self._disconnected_cb:
-            result = self._disconnected_cb(member)
-            if result is Awaitable: await result
+            await self._disconnected_cb(member)
         self._start_connecting(member, self._retry_policy)
 
     
@@ -172,19 +176,22 @@ class TcpNetwork(Network):
         self._reading_tasks.add(task)
         task.add_done_callback(self._reading_tasks.discard)
         if self._connected_cb:
-            result = self._connected_cb(member)
-            if result is Awaitable: await result
+            await self._connected_cb(member)
 
 
     def get_connected_members(self) -> list[NetworkMember]:
         return self._connections.keys()
 
 
-    def set_disconnected_callback(self, cb: Callable[[NetworkMember], None | Awaitable]) -> None:
+    def set_read_callback(self, cb: Callable[[NetworkMember, bytes], Awaitable] | None) -> None:
+        self._recv_cb = cb
+
+
+    def set_disconnected_callback(self, cb: Callable[[NetworkMember], Awaitable] | None) -> None:
         self._disconnected_cb = cb
 
 
-    def set_connected_callback(self, cb: Callable[[NetworkMember], None | Awaitable]) -> None:
+    def set_connected_callback(self, cb: Callable[[NetworkMember], Awaitable] | None) -> None:
         self._connected_cb = cb
 
 
@@ -205,5 +212,5 @@ class TcpNetwork(Network):
         self._server_task.cancel()
         for task in self._reading_tasks.union(self._connection_tasks):
             task.cancel()
-        for mem in self._connections.keys():
+        for mem in self._other_members:
             await self._handle_disconnected(mem)
