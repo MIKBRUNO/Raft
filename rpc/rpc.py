@@ -5,12 +5,18 @@ from .rpc_scheme import RPCCall, RPCResponse, RPCScheme, RPCTypes
 import asyncio
 
 
+class RPCTerminatedException(BaseException):
+    pass
+
+
 class RPC:
     def __init__(self):
         self._event = asyncio.Event()
         self._result = None
+        self._terminated = False
 
     def terminate(self):
+        self._terminated = True
         self._event.set()
 
     def response(self, answer: dict):
@@ -24,6 +30,8 @@ class RPC:
                 await self._event.wait()
         except TimeoutError:
             return False
+        if self._terminated:
+            raise RPCTerminatedException()
         return True
 
     @property
@@ -55,28 +63,27 @@ class RPCManager:
     
     
     async def call(self, member: NetworkMember, args: dict | None) -> dict | None:
+        """raises: RPCTerminatedException"""
         msg = RPCCall(args)
         rpc = RPC()
         self._rpcs[msg.id] = rpc
         data = msg.dump()
-        await self._network.send(member, data)
-        while not await rpc.wait(self._retry_policy()):
+        try:
             await self._network.send(member, data)
-        self._rpcs.pop(msg.id)
+            while not await rpc.wait(self._retry_policy()):
+                await self._network.send(member, data)
+        finally:
+            self._rpcs.pop(msg.id)
         return rpc.answer
     
 
-    def cancel_pending_rpcs(self):
+    def terminate_pending_rpcs(self):
         for rpc in self._rpcs:
             rpc.terminate()
 
 
     def get_rcp_endpoint(self, member: NetworkMember) -> RPCCallable:
         return MemberCallable(self, member)
-    
-
-    async def close(self):
-        self.cancel_pending_rpcs()
 
 
     async def _read_callback(self, member: NetworkMember, data: bytes):

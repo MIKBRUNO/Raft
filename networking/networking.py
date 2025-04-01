@@ -30,6 +30,10 @@ class Network(ABC):
 
 
     @abstractmethod
+    async def run(self): ...
+
+
+    @abstractmethod
     def set_disconnected_callback(self, cb: Callable[[NetworkMember], None | Awaitable[None]] | None) -> None: ...
 
 
@@ -43,7 +47,3 @@ class Network(ABC):
 
     @abstractmethod
     async def send(self, member: NetworkMember, msg: bytes) -> None: ...
-
-
-    @abstractmethod
-    async def close(self) -> None: ...
