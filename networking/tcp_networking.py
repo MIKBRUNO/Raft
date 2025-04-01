@@ -81,62 +81,70 @@ class TcpNetwork(Network):
         self._disconnected_cb: Callable[[NetworkMember], None | Awaitable[None]] = None
         self._connected_cb: Callable[[NetworkMember], None | Awaitable[None]] = None
         self._connections: dict[TcpMember, tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
-        self._connection_tasks = set()
-        self._reading_tasks = set()
+        self._task_group: asyncio.TaskGroup = None
         self._retry_policy: Callable[[], float] = retry_connection_policy
-        for mem in self._other_members:
-            self._start_connecting(mem, self._retry_policy)
-        self._server_task = asyncio.create_task(self._start_server())
 
 
-    async def _start_server(self):
-        server = await asyncio.start_server(
-            self._handle_connected_by_server,
-            self._this.address.ip, self._this.address.port)
-        await server.serve_forever()
-
-
-    def _start_connecting(self, member: TcpMember, retry_policy: Callable[[], float]):
-        task = asyncio.create_task(self._try_connnect_coroutine(member, retry_policy))
-        self._connection_tasks.add(task)
-        task.add_done_callback(self._connection_tasks.discard)
-
-
-    async def _try_connnect_coroutine(self, member: TcpMember, retry_policy: Callable[[], float]):
-        while (member > self._this and member not in self._connections.keys()):
-            await asyncio.sleep(retry_policy())
-            try:
-                reader, writer = await asyncio.open_connection(member.address.ip, member.address.port)
-                try:
-                    writer.write(self._this.hash)
-                    await writer.drain()
-                except:
-                    writer.close()
-                    await writer.wait_closed()
-                    continue
-                self._connections[member] = (reader, writer)
-                await self._handle_connected(member)
-                break
-            except asyncio.CancelledError:
-                break
-            except:
-                continue
+    async def run(self):
+        server: asyncio.Server | None = None
+        try:
+            async with asyncio.TaskGroup() as tg:
+                self._task_group = tg
+                server = await asyncio.start_server(
+                    self._handle_connected_by_server,
+                    self._this.address.ip, self._this.address.port)
+                for mem in self._other_members:
+                    self._start_connecting(mem, self._retry_policy)
+                # server.serve_forever()
+                while True:
+                    await asyncio.sleep(100)
+        finally:
+            # if server:
+            #     server.close()
+            #     await server.wait_closed()
+            self._task_group = None
+            self._connections.clear()
 
 
     async def _handle_connected_by_server(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
             peer_hash = await reader.readexactly(32)
-        except:
+        except (ConnectionError, asyncio.IncompleteReadError):
             writer.close()
             await writer.wait_closed()
-            return
-        member = TcpMember(hash=peer_hash)
-        if member in self._other_members:
-            self._connections[member] = (reader, writer)
-            await self._handle_connected(member)
         else:
-            writer.close()
-            await writer.wait_closed()
+            member = TcpMember(hash=peer_hash)
+            if member in self._other_members:
+                self._connections[member] = (reader, writer)
+                await self._handle_connected(member)
+            else:
+                writer.close()
+                await writer.wait_closed()
+
+
+    async def _handle_connected(self, member: TcpMember):
+        self._task_group.create_task(self._handle_read(member))
+        if asyncio.iscoroutinefunction(self._connected_cb):
+            await self._connected_cb(member)
+        elif self._connected_cb:
+            self._connected_cb(member)
+
+
+    def _start_connecting(self, member: TcpMember, retry_policy: Callable[[], float]):
+        self._task_group.create_task(self._try_connnect_coroutine(member, retry_policy))
+
+
+    async def _try_connnect_coroutine(self, member: TcpMember, retry_policy: Callable[[], float]):
+        while (member > self._this and member not in self._connections.keys()):
+            try:
+                reader, writer = await asyncio.open_connection(member.address.ip, member.address.port)
+                writer.write(self._this.hash)
+                await writer.drain()
+                self._connections[member] = (reader, writer)
+                await self._handle_connected(member)
+                break
+            except ConnectionError:
+                await asyncio.sleep(retry_policy())
 
 
     async def _handle_read(self, member: TcpMember):
@@ -152,9 +160,23 @@ class TcpNetwork(Network):
                     await self._recv_cb(member, message)
                 elif self._recv_cb:
                     self._recv_cb(member, message)
-            except (ConnectionError, asyncio.IncompleteReadError, asyncio.CancelledError):
+            except (ConnectionError, asyncio.IncompleteReadError):
                 break
         await self._handle_disconnected(member)
+
+
+    async def send(self, member: NetworkMember, msg: bytes) -> None:
+        if member not in self._connections.keys():
+            return
+        writer = self._connections[member][1]
+        msg_len = len(msg)
+        try:
+            writer.write(msg_len.to_bytes(length=4, byteorder="big", signed=False))
+            await asyncio.sleep(100)
+            writer.write(msg)
+            await writer.drain()
+        except ConnectionError:
+            await self._handle_disconnected(member)
 
 
     async def _handle_disconnected(self, member: TcpMember):
@@ -162,26 +184,13 @@ class TcpNetwork(Network):
             return
         writer = self._connections[member][1]
         self._connections.pop(member)
-        try:
-            writer.close()
-            await writer.wait_closed()
-        except ConnectionError:
-            pass
+        writer.close()
+        await writer.wait_closed()
         if asyncio.iscoroutinefunction(self._disconnected_cb):
             await self._disconnected_cb(member)
         elif self._disconnected_cb:
             self._disconnected_cb(member)
         self._start_connecting(member, self._retry_policy)
-
-    
-    async def _handle_connected(self, member: TcpMember):
-        task = asyncio.create_task(self._handle_read(member))
-        self._reading_tasks.add(task)
-        task.add_done_callback(self._reading_tasks.discard)
-        if asyncio.iscoroutinefunction(self._connected_cb):
-            await self._connected_cb(member)
-        elif self._connected_cb:
-            self._connected_cb(member)
 
 
     @property
@@ -209,24 +218,3 @@ class TcpNetwork(Network):
 
     def set_connected_callback(self, cb: Callable[[NetworkMember], None | Awaitable[None]] | None) -> None:
         self._connected_cb = cb
-
-
-    async def send(self, member: NetworkMember, msg: bytes) -> None:
-        if member not in self._connections.keys():
-            return
-        writer = self._connections[member][1]
-        msg_len = len(msg)
-        try:
-            writer.write(msg_len.to_bytes(length=4, byteorder="big", signed=False))
-            writer.write(msg)
-            await writer.drain()
-        except ConnectionError:
-            await self._handle_disconnected(member)
-
-    
-    async def close(self) -> None:
-        self._server_task.cancel()
-        for task in self._reading_tasks.union(self._connection_tasks):
-            task.cancel()
-        for mem in self._other_members:
-            await self._handle_disconnected(mem)
