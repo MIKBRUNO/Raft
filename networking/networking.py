@@ -8,38 +8,37 @@ class NetworkMember(ABC):
     def id(self) -> Any: ...
 
 
-    @abstractmethod
-    def __eq__(self, other: 'NetworkMember') -> bool: ...
-
-
-    @abstractmethod
-    def __lt__(self, other) -> bool: ...
-
-
-    @abstractmethod
-    def __le__(self, other) -> bool: ...
-
-
 class Network(ABC):
     @abstractmethod
     def __init__(self, member: NetworkMember, other_members: list[NetworkMember]):
         super().__init__()
 
 
+    @property
     @abstractmethod
-    def get_connected_members(self) -> list[NetworkMember]: ...
+    def connected_members(self) -> list[NetworkMember]: ...
+
+
+    @property
+    @abstractmethod
+    def members(self) -> list[NetworkMember]: ...
+
+
+    @property
+    @abstractmethod
+    def this(self) -> NetworkMember: ...
 
 
     @abstractmethod
-    def set_disconnected_callback(self, cb: Callable[[NetworkMember], Awaitable] | None) -> None: ...
+    def set_disconnected_callback(self, cb: Callable[[NetworkMember], None | Awaitable[None]] | None) -> None: ...
 
 
     @abstractmethod
-    def set_read_callback(self, cb: Callable[[NetworkMember, bytes], Awaitable] | None) -> None: ...
+    def set_read_callback(self, cb: Callable[[NetworkMember, bytes], None | Awaitable[None]] | None) -> None: ...
     
     
     @abstractmethod
-    def set_connected_callback(self, cb: Callable[[NetworkMember], Awaitable] | None) -> None: ...
+    def set_connected_callback(self, cb: Callable[[NetworkMember], None | Awaitable[None]] | None) -> None: ...
 
 
     @abstractmethod

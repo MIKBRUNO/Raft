@@ -22,16 +22,18 @@ async def handler(m: TcpMember, d: dict) -> dict:
     return {"answer": "wowo"}
 
 async def main():
-    rpc = RPCManager(this, members, handler)
+    net = TcpNetwork(this, members)
+    rpc = RPCManager(net, handler)
     try:
         while True:
             i = await ainput("0-1: ")
-            cl = rpc.get_callable(members[int(i)])
+            cl = rpc.get_rcp_endpoint(members[int(i)])
             msg = await ainput("msg: ")
             msg_dict = json.loads(msg)
             print("answer", await cl.call(msg_dict))
     finally:
         await rpc.close()
+        await net.close()
 
 try:
     asyncio.run(main())

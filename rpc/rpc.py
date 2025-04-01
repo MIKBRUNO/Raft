@@ -1,14 +1,8 @@
-from typing import Any, Callable, Awaitable
-from networking import NetworkMember, Network, TcpNetwork
-from abc import ABC, abstractmethod
-import json
+from typing import Callable, Awaitable, Hashable
+from networking import NetworkMember, Network
+from .rpc_callable import RPCCallable
+from .rpc_scheme import RPCCall, RPCResponse, RPCScheme, RPCTypes
 import asyncio
-from enum import Enum
-
-
-class RPCTypes(Enum):
-    CALL = 0
-    RESPONSE = 1
 
 
 class RPC:
@@ -20,8 +14,9 @@ class RPC:
         self._event.set()
 
     def response(self, answer: dict):
-        self._result = answer
-        self._event.set()
+        if not self._event.is_set():
+            self._result = answer
+            self._event.set()
 
     async def wait(self, timeout: int | None = None) -> bool:
         try:
@@ -36,83 +31,68 @@ class RPC:
         return self._result
 
 
-class RPCCallable(ABC):
-    @abstractmethod
-    async def call(self, args: dict) -> dict | None:
-        ...
-
-
 class MemberCallable(RPCCallable):
-        def __init__(self, rpc: 'RPCManager', member: NetworkMember):
-            self._this = member
-            self._rpc = rpc
-        
-        async def call(self, args: dict) -> Any:
-            return await self._rpc.call(self._this, args)
+    def __init__(self, rpc: 'RPCManager', member: NetworkMember):
+        self._this = member
+        self._rpc = rpc
+    
+    async def call(self, args: dict) -> dict:
+        return await self._rpc.call(self._this, args)
 
 
 class RPCManager:
-    def __init__(self, member: NetworkMember, other_members: list[NetworkMember], handler: Callable[[NetworkMember, dict], Awaitable[dict]],
-                 network_factory: Callable[[NetworkMember, list[NetworkMember]], Network] = TcpNetwork, retry_policy: Callable[[], float] = lambda: 1):
-        self._handler = handler
-        self._others = other_members
-        self._idx = 0
-        self._rpcs: dict[NetworkMember, dict[int, RPC]] = {m : {} for m in other_members}
-        self._network = network_factory(member, other_members)
+    def __init__(self, network: Network,
+                 input_calls_handler: Callable[[NetworkMember, dict], Awaitable[dict | None] | dict | None],
+                 retry_policy: Callable[[], float] | None = None):
+        self._network = network
         self._network.set_read_callback(self._read_callback)
-        self._retry_policy = retry_policy
+        self._others = network.members
+        self._handler = input_calls_handler
+        self._retry_policy = lambda: 1
+        if retry_policy:
+            self._retry_policy = retry_policy
+        self._rpcs: dict[Hashable, RPC] = {}
     
     
     async def call(self, member: NetworkMember, args: dict | None) -> dict | None:
-        self._idx += 1
-        i = self._idx
+        msg = RPCCall(args)
         rpc = RPC()
-        self._rpcs[member][i] = rpc
-        await self._send(member, i, RPCTypes.CALL, args)
+        self._rpcs[msg.id] = rpc
+        data = msg.dump()
+        await self._network.send(member, data)
         while not await rpc.wait(self._retry_policy()):
-            await self._send(member, i, RPCTypes.CALL, args)
-        self._rpcs[member].pop(i)
+            await self._network.send(member, data)
+        self._rpcs.pop(msg.id)
         return rpc.answer
     
 
-    def cancel_pending_rpcs(self, member: NetworkMember | None = None):
-        if not member:
-            for v in self._rpcs.values():
-                for i, m in v.items():
-                    m.terminate()
-            return
-        if member in self._rpcs.keys():
-            for i, m in self._rpcs[member].items():
-                m.terminate()
+    def cancel_pending_rpcs(self):
+        for rpc in self._rpcs:
+            rpc.terminate()
 
 
-    def get_callable(self, member: NetworkMember) -> RPCCallable:
+    def get_rcp_endpoint(self, member: NetworkMember) -> RPCCallable:
         return MemberCallable(self, member)
     
 
     async def close(self):
         self.cancel_pending_rpcs()
-        await self._network.close()
 
 
-    async def _send(self, member: NetworkMember, i: int, type: RPCTypes, data: dict):
-        data_name = 'args' if type == RPCTypes.CALL else 'result'
-        await self._network.send(member, bytes(json.dumps({'i': i, 'type': type.name, data_name: data}), encoding="UTF-8"))
-
-
-    async def _read_callback(self, member: NetworkMember, msg: bytes):
-        try:
-            answer = json.loads(msg)
-            typ = answer['type']
-            i = answer['i']
-            if RPCTypes[typ] == RPCTypes.CALL:
-                result = await self._handler(member, answer['args'])
-                await self._send(member, i, RPCTypes.RESPONSE, result)
-            elif RPCTypes[typ] == RPCTypes.RESPONSE:
-                if i not in self._rpcs[member].keys():
-                    return
-                self._rpcs[member][i].response(answer['result'])
+    async def _read_callback(self, member: NetworkMember, data: bytes):
+        msg: RPCScheme = RPCScheme.load(data)
+        if not msg:
+            return
+        if msg.rpc_type == RPCTypes.CALL:
+            if asyncio.iscoroutinefunction(self._handler):
+                result = await self._handler(member, msg.data)
             else:
+                result = self._handler(member, msg.data)
+            if result:
+                await self._network.send(member, RPCResponse(msg.id, result).dump())
+        elif msg.rpc_type == RPCTypes.RESPONSE:
+            if msg.id not in self._rpcs.keys():
                 return
-        except json.JSONDecodeError | KeyError as e:
-            ...
+            self._rpcs[msg.id].response(msg.data)
+        else:
+            return

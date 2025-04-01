@@ -1,4 +1,4 @@
-from networking import NetworkMember, Network
+from .networking import NetworkMember, Network
 from typing import Callable, Awaitable, Optional
 import asyncio
 from ipaddress import ip_address, IPv4Address, IPv6Address
@@ -77,9 +77,9 @@ class TcpNetwork(Network):
         super().__init__(member, other_members)
         self._this = member
         self._other_members = other_members
-        self._recv_cb: Callable[[NetworkMember, bytes], Awaitable] = None
-        self._disconnected_cb: Callable[[NetworkMember], Awaitable] = None
-        self._connected_cb: Callable[[NetworkMember], Awaitable] = None
+        self._recv_cb: Callable[[NetworkMember, bytes], None | Awaitable[None]] = None
+        self._disconnected_cb: Callable[[NetworkMember], None | Awaitable[None]] = None
+        self._connected_cb: Callable[[NetworkMember], None | Awaitable[None]] = None
         self._connections: dict[TcpMember, tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
         self._connection_tasks = set()
         self._reading_tasks = set()
@@ -91,7 +91,7 @@ class TcpNetwork(Network):
 
     async def _start_server(self):
         server = await asyncio.start_server(
-            self._handle_client_connected,
+            self._handle_connected_by_server,
             self._this.address.ip, self._this.address.port)
         await server.serve_forever()
 
@@ -123,7 +123,7 @@ class TcpNetwork(Network):
                 continue
 
 
-    async def _handle_client_connected(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def _handle_connected_by_server(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
             peer_hash = await reader.readexactly(32)
         except:
@@ -148,9 +148,11 @@ class TcpNetwork(Network):
                 msg_len_bytes = await reader.readexactly(4)
                 msg_len = int.from_bytes(msg_len_bytes, byteorder="big", signed=False)
                 message = await reader.readexactly(msg_len)
-                if self._recv_cb:
+                if asyncio.iscoroutinefunction(self._recv_cb):
                     await self._recv_cb(member, message)
-            except:
+                elif self._recv_cb:
+                    self._recv_cb(member, message)
+            except (ConnectionError, asyncio.IncompleteReadError, asyncio.CancelledError):
                 break
         await self._handle_disconnected(member)
 
@@ -158,16 +160,17 @@ class TcpNetwork(Network):
     async def _handle_disconnected(self, member: TcpMember):
         if member not in self._connections.keys():
             return
-        reader = self._connections[member][0]
         writer = self._connections[member][1]
         self._connections.pop(member)
         try:
             writer.close()
             await writer.wait_closed()
         except ConnectionError:
-            ...
-        if self._disconnected_cb:
+            pass
+        if asyncio.iscoroutinefunction(self._disconnected_cb):
             await self._disconnected_cb(member)
+        elif self._disconnected_cb:
+            self._disconnected_cb(member)
         self._start_connecting(member, self._retry_policy)
 
     
@@ -175,23 +178,36 @@ class TcpNetwork(Network):
         task = asyncio.create_task(self._handle_read(member))
         self._reading_tasks.add(task)
         task.add_done_callback(self._reading_tasks.discard)
-        if self._connected_cb:
+        if asyncio.iscoroutinefunction(self._connected_cb):
             await self._connected_cb(member)
+        elif self._connected_cb:
+            self._connected_cb(member)
 
 
-    def get_connected_members(self) -> list[NetworkMember]:
+    @property
+    def connected_members(self) -> list[NetworkMember]:
         return self._connections.keys()
 
 
-    def set_read_callback(self, cb: Callable[[NetworkMember, bytes], Awaitable] | None) -> None:
+    @property
+    def members(self) -> list[NetworkMember]:
+        return self._other_members
+
+
+    @property
+    def this(self) -> NetworkMember:
+        return self._this
+
+
+    def set_read_callback(self, cb: Callable[[NetworkMember, bytes], None | Awaitable[None]] | None) -> None:
         self._recv_cb = cb
 
 
-    def set_disconnected_callback(self, cb: Callable[[NetworkMember], Awaitable] | None) -> None:
+    def set_disconnected_callback(self, cb: Callable[[NetworkMember], None | Awaitable[None]] | None) -> None:
         self._disconnected_cb = cb
 
 
-    def set_connected_callback(self, cb: Callable[[NetworkMember], Awaitable] | None) -> None:
+    def set_connected_callback(self, cb: Callable[[NetworkMember], None | Awaitable[None]] | None) -> None:
         self._connected_cb = cb
 
 
@@ -204,7 +220,7 @@ class TcpNetwork(Network):
             writer.write(msg_len.to_bytes(length=4, byteorder="big", signed=False))
             writer.write(msg)
             await writer.drain()
-        except:
+        except ConnectionError:
             await self._handle_disconnected(member)
 
     
