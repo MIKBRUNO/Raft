@@ -3,9 +3,10 @@ from networking import NetworkMember
 
 
 class RaftState:
-    _leader_id: Any = None
-    _voted_for: NetworkMember = None
-    _current_term: int = 0
+    def __init__(self):
+        self._leader_id: Any = None
+        self._voted_for: NetworkMember = None
+        self._current_term: int = 0
     
     @property
     def voted_for(self) -> NetworkMember | None:

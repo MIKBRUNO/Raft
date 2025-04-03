@@ -64,7 +64,7 @@ class RPCScheme(ABC):
 
 
     def __str__(self) -> str:
-        return self.id
+        return f"{self.id}: {self.data}"
 
 
 class RPCCall(RPCScheme):

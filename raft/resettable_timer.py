@@ -19,10 +19,9 @@ class ResettableTimer:
             self._timeout = timeout
         self._active = True
         if self._task:
-            print("not created")
             self._event.set()
         else:
-            print("actually created")
+            self._event.clear()
             self._task = asyncio.create_task(self._coro())
 
     
@@ -37,7 +36,9 @@ class ResettableTimer:
                 async with asyncio.timeout(self._timeout):
                     await self._event.wait()
             except asyncio.TimeoutError:
-                await self._cb()
-                self._active = False
+                if self._active:
+                    # couples execution
+                    await self._cb()
+                    self._active = False
             self._event.clear()
         self._task = None

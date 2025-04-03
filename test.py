@@ -1,6 +1,9 @@
 import asyncio
 import sys
 from networking import TcpNetwork, TcpMember
+from raft import RaftServer
+import logging
+from random import random
 
 async def connect_stdin_stdout():
     loop = asyncio.get_event_loop()
@@ -11,30 +14,24 @@ async def connect_stdin_stdout():
     writer = asyncio.StreamWriter(w_transport, w_protocol, reader, loop)
     return reader, writer
 
-members = [TcpMember(address=('127.0.0.1', 4001)), TcpMember(address=('127.0.0.1', 4002)), TcpMember(address=('127.0.0.1', 4003))]
-i = input("1-3: ")
+n = 5
+
+members = [TcpMember(address=('127.0.0.1', 4000 + i)) for i in range(n + 1)]
+i = input(f"1-{n}: ")
 this = TcpMember(address=('127.0.0.1', 4000 + int(i)))
 members.remove(this)
 
-network = TcpNetwork(this, members)
-network.set_read_callback(lambda m, b: print("from ", m, ": ", b))
-network.set_connected_callback(lambda m: print("connected: ", m))
-network.set_disconnected_callback(lambda m: print("disconnected: ", m))
+network = TcpNetwork(this, members, lambda: 0.1)
+network.set_connected_callback(lambda m: logging.debug(f"Connected {m.id}"))
+network.set_disconnected_callback(lambda m: logging.debug(f"Disconnected {m.id}"))
 
 async def main():
-    task = asyncio.create_task(network.run())
-    r, w = await connect_stdin_stdout()
-    while True:
-        w.write(b"0-1: ")
-        await w.drain()
-        i = str(await r.readline(), encoding="UTF-8")
-        w.write(b"msg: ")
-        await w.drain()
-        msg = await r.readline()
-        await network.send(members[int(i)], msg)
+    raft = RaftServer(network, lambda: 5 + 2 * random(), lambda: 1, retry_rpc_policy=lambda: 0.1)
+    await network.run()
 
 if __name__ == "__main__":
     try:
+        logging.basicConfig(level=logging.DEBUG, stream=sys.stdout)
         asyncio.run(main())
     except KeyboardInterrupt:
         pass

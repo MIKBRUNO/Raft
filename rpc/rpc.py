@@ -3,6 +3,11 @@ from networking import NetworkMember, Network
 from .rpc_callable import RPCCallable
 from .rpc_scheme import RPCCall, RPCResponse, RPCScheme, RPCTypes
 import asyncio
+import logging
+
+
+__logger__ = logging.getLogger(__name__)
+__logger__.setLevel(logging.ERROR)
 
 
 class RPCTerminatedException(BaseException):
@@ -46,25 +51,40 @@ class MemberCallable(RPCCallable):
     
     async def call(self, args: dict) -> dict:
         return await self._rpc.call(self._this, args)
+    
+    def __str__(self):
+        return str(self._this)
 
 
 class RPCManager:
     def __init__(self, network: Network,
-                 input_calls_handler: Callable[[NetworkMember, dict], Awaitable[dict | None] | dict | None],
                  retry_policy: Callable[[], float] | None = None):
         self._network = network
         self._network.set_read_callback(self._read_callback)
         self._others = network.members
-        self._handler = input_calls_handler
         self._retry_policy = lambda: 1
         if retry_policy:
             self._retry_policy = retry_policy
         self._rpcs: dict[Hashable, RPC] = {}
+        self._q = asyncio.Queue()
     
+
+    async def listen(self, handler: Callable[[NetworkMember, dict], Awaitable[dict | None] | dict | None]):
+        m, d, q = await self._q.get()
+        r = None
+        try:
+            if asyncio.iscoroutinefunction(handler):
+                r = await handler(m, d)
+            else:
+                r = handler(m, d)
+        finally:
+            await q.put(r)
+
     
     async def call(self, member: NetworkMember, args: dict | None) -> dict | None:
         """raises: RPCTerminatedException"""
         msg = RPCCall(args)
+        __logger__.debug(f"Send CALL {msg}")
         rpc = RPC()
         self._rpcs[msg.id] = rpc
         data = msg.dump()
@@ -78,7 +98,7 @@ class RPCManager:
     
 
     def terminate_pending_rpcs(self):
-        for rpc in self._rpcs:
+        for rpc in self._rpcs.values():
             rpc.terminate()
 
 
@@ -89,15 +109,18 @@ class RPCManager:
     async def _read_callback(self, member: NetworkMember, data: bytes):
         msg: RPCScheme = RPCScheme.load(data)
         if not msg:
+            __logger__.warning(f"invalid data recieved: {data}")
             return
         if msg.rpc_type == RPCTypes.CALL:
-            if asyncio.iscoroutinefunction(self._handler):
-                result = await self._handler(member, msg.data)
-            else:
-                result = self._handler(member, msg.data)
+            __logger__.debug(f"Recieved CALL {msg}")
+            q = asyncio.Queue()
+            await self._q.put((member, msg.data, q))
+            result = await q.get()
             if result:
+                __logger__.debug(f"Send RESPONSE {RPCResponse(msg.id, result)}")
                 await self._network.send(member, RPCResponse(msg.id, result).dump())
         elif msg.rpc_type == RPCTypes.RESPONSE:
+            __logger__.debug(f"Recieved RESPONSE {msg}")
             if msg.id not in self._rpcs.keys():
                 return
             self._rpcs[msg.id].response(msg.data)

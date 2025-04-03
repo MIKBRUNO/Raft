@@ -110,16 +110,18 @@ class TcpNetwork(Network):
         try:
             peer_hash = await reader.readexactly(32)
         except (ConnectionError, asyncio.IncompleteReadError):
-            writer.close()
-            await writer.wait_closed()
+            if not writer.is_closing():
+                writer.close()
+                await writer.wait_closed()
         else:
             member = TcpMember(hash=peer_hash)
             if member in self._other_members:
                 self._connections[member] = (reader, writer)
                 await self._handle_connected(member)
             else:
-                writer.close()
-                await writer.wait_closed()
+                if not writer.is_closing():
+                    writer.close()
+                    await writer.wait_closed()
 
 
     async def _handle_connected(self, member: TcpMember):
@@ -172,7 +174,6 @@ class TcpNetwork(Network):
         msg_len = len(msg)
         try:
             writer.write(msg_len.to_bytes(length=4, byteorder="big", signed=False))
-            await asyncio.sleep(100)
             writer.write(msg)
             await writer.drain()
         except ConnectionError:
@@ -184,8 +185,9 @@ class TcpNetwork(Network):
             return
         writer = self._connections[member][1]
         self._connections.pop(member)
-        writer.close()
-        await writer.wait_closed()
+        if not writer.is_closing():
+            writer.close()
+            await writer.wait_closed()
         if asyncio.iscoroutinefunction(self._disconnected_cb):
             await self._disconnected_cb(member)
         elif self._disconnected_cb:
