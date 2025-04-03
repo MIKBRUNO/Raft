@@ -20,10 +20,6 @@ class ElectionCompleteException(BaseException):
     pass
 
 
-class HigherTermException(BaseException):
-    pass
-
-
 class RaftServer(StateMachine):
     follower = State(initial=True)
     candidate = State()
@@ -35,24 +31,8 @@ class RaftServer(StateMachine):
     new_leader = candidate.to(follower)
 
 
-    # def before_transition(self, event, state):
-    #     __logger__.debug(f"Before '{event}', on the '{state.id}' state.")
-
-
-    # def on_transition(self, event, state):
-    #     __logger__.debug(f"On '{event}', on the '{state.id}' state.")
-
-
-    # def on_exit_state(self, event, state):
-    #     __logger__.debug(f"Exiting '{state.id}' state from '{event}' event.")
-
-
     def on_enter_state(self, event, state):
         __logger__.debug(f"Entering '{state.id}' state from '{event}' event.")
-
-
-    # def after_transition(self, event, state):
-    #     __logger__.debug(f"After '{event}', on the '{state.id}' state.")
 
 
     def __init__(self, network: Network, election_timeout_policy: Callable[[], float],
@@ -132,6 +112,17 @@ class RaftServer(StateMachine):
             self._election_timeout = None
 
 
+    async def _run_leader(self):
+        rpcs = [self._rpcm.get_rcp_endpoint(m) for m in self._members.values()]
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(self._listen_forever())
+                for r in rpcs:
+                    tg.create_task(self._append_entries(r))
+        except* RPCTerminatedException:
+            pass
+
+
     async def _request_vote(self, rpc: RPCCallable) -> bool:
         __logger__.debug(f"call RequestVote({rpc}, {self._state.current_term})")
         result = await rpc.call({"type": RaftRPCTypes.REQUESTVOTE.name, "term": self._state.current_term})
@@ -188,17 +179,6 @@ class RaftServer(StateMachine):
             except KeyError:
                 pass
             await asyncio.sleep(self._heartbeat_policy())
-
-
-    async def _run_leader(self):
-        rpcs = [self._rpcm.get_rcp_endpoint(m) for m in self._members.values()]
-        try:
-            async with asyncio.TaskGroup() as tg:
-                tg.create_task(self._listen_forever())
-                for r in rpcs:
-                    tg.create_task(self._append_entries(r))
-        except* RPCTerminatedException:
-            pass
 
     
     async def _handle_rpc_call(self, member: NetworkMember, args: dict) -> dict | None:
