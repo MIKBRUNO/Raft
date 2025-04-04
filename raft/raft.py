@@ -42,7 +42,7 @@ class RaftServer(StateMachine):
         self._network = network
         self._members = {m.id: m for m in self._network.members}
         self._rpcm = RPCManager(network, retry_policy=retry_rpc_policy)
-        self._state = RaftState()
+        self._state = RaftState(self._network.this)
         self._heartbeat_policy = heartbeat_policy if heartbeat_policy else lambda: 0
         self._election_timeout_policy = election_timeout_policy
         self._election_timeout: asyncio.Timeout | None = None
@@ -98,7 +98,7 @@ class RaftServer(StateMachine):
 
     async def _run_candidate(self):
         self._state.current_term += 1
-        self._state.voted_for = self._network.this
+        self._state.voted_for = self._network.this.id
         try:
             async with asyncio.timeout(self._election_timeout_policy()) as t:
                 self._election_timeout = t
@@ -220,7 +220,7 @@ class RaftServer(StateMachine):
             self._state.current_term = term
             self._state.voted_for = None
             self.higher_term(term)
-        if self._state.voted_for is None or member == self._state.voted_for:
-            self._state.voted_for = member
+        if self._state.voted_for is None or member.id == self._state.voted_for:
+            self._state.voted_for = member.id
             return answer(True)
         return answer(False)

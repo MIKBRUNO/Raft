@@ -21,12 +21,12 @@ i = input(f"1-{n}: ")
 this = TcpMember(address=('127.0.0.1', 4000 + int(i)))
 members.remove(this)
 
-network = TcpNetwork(this, members, lambda: 0.1)
+network = TcpNetwork(this, members, lambda: 0.05)
 network.set_connected_callback(lambda m: logging.debug(f"Connected {m.id}"))
 network.set_disconnected_callback(lambda m: logging.debug(f"Disconnected {m.id}"))
 
 async def main():
-    raft = RaftServer(network, lambda: 5 + 2 * random(), lambda: 1, retry_rpc_policy=lambda: 0.1)
+    raft = RaftServer(network, lambda: 0.5 + 0.3 * random(), lambda: 0.1, retry_rpc_policy=lambda: 0.05)
     await network.run()
 
 if __name__ == "__main__":
