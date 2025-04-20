@@ -1,5 +1,5 @@
 from typing import Callable, Awaitable, Hashable
-from networking import NetworkMember, Network
+from raft.networking import NetworkMember, Network
 from .rpc_callable import RPCCallable
 from .rpc_scheme import RPCCall, RPCResponse, RPCScheme, RPCTypes
 import asyncio

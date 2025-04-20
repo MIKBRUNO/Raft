@@ -1,7 +1,7 @@
 import asyncio
 import sys
-from networking import TcpNetwork, TcpMember
-from raft import RaftServer
+from raft.networking import TcpNetwork, TcpMember
+from raft import RaftObject
 import logging
 from random import random
 
@@ -26,7 +26,7 @@ network.set_connected_callback(lambda m: logging.debug(f"Connected {m.id}"))
 network.set_disconnected_callback(lambda m: logging.debug(f"Disconnected {m.id}"))
 
 async def main():
-    raft = RaftServer(network, lambda: 0.5 + 0.3 * random(), lambda: 0.1, retry_rpc_policy=lambda: 0.05)
+    raft = RaftObject(network, lambda: 0.5 + 0.3 * random(), lambda: 0.1, retry_rpc_policy=lambda: 0.05)
     await network.run()
 
 if __name__ == "__main__":

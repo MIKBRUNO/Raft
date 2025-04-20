@@ -1,6 +1,6 @@
 from .raft_state import RaftState
-from networking import Network, NetworkMember
-from rpc import RPCManager, RPCCallable, RPCTerminatedException
+from .networking import Network, NetworkMember
+from .rpc import RPCManager, RPCCallable, RPCTerminatedException
 from typing import Callable, Awaitable
 from statemachine import State, StateMachine
 from enum import Enum
@@ -20,7 +20,7 @@ class ElectionCompleteException(BaseException):
     pass
 
 
-class RaftServer(StateMachine):
+class RaftObject(StateMachine):
     follower = State(initial=True)
     candidate = State()
     leader = State()

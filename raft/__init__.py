@@ -1,1 +1,1 @@
-from .raft import RaftServer
+from .raft_object import RaftObject

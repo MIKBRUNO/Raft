@@ -1,5 +1,5 @@
 from typing import Any
-from networking import NetworkMember
+from .networking import NetworkMember
 import json
 
 
