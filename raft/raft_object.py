@@ -210,6 +210,15 @@ class RaftObject(StateMachine):
             self.higher_term(command.term)
         if self._state.current_term == command.term:
             self.new_leader()
+        log = self._state.log
+        if len(log) <= command.prevLogIndex or log[command.prevLogIndex].term != command.prevLogTerm:
+            return answer(False)
+        log = log[:command.prevLogIndex + 1]
+        log.extend(command.entries)
+        self._state.log = log
+        if command.leaderCommit > self._state.commit_index:
+            self._state.commit_index = min(command.leaderCommit, len(log) - 1)
+            ... # update external state machine (last_applied = commitIndex and apply command)
         ... # redirect pending user requests
         return answer(True)
 
@@ -225,7 +234,10 @@ class RaftObject(StateMachine):
             self._state.current_term = command.term
             self._state.voted_for = None
             self.higher_term(command.term)
-        if self._state.voted_for is None or member.id == self._state.voted_for:
+        log = self._state.log
+        if (self._state.voted_for is None or member.id == self._state.voted_for) \
+            and command.lastLogIndex >= len(log) - 1 \
+            and command.lastLogTerm >= log[-1].term:
             self._state.voted_for = member.id
             return answer(True)
         return answer(False)

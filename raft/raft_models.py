@@ -3,6 +3,11 @@ from pydantic import BaseModel, ConfigDict
 from enum import Enum
 
 
+class RaftLogItem(BaseModel):
+    term: int
+    command: dict
+
+
 class RaftRPCType(Enum):
     APPENDENTRIES = 'APPENDENTRIES'
     REQUESTVOTE = 'REQUESTVOTE'
@@ -17,6 +22,10 @@ class RaftRPCMessage(BaseModel):
 class AppendEntries(RaftRPCMessage):
     raft_type: RaftRPCType = RaftRPCType.APPENDENTRIES
     term: int
+    prevLogIndex: int
+    prevLogTerm: int
+    entries: list[RaftLogItem]
+    leaderCommit: int
 
 
 class AppendEntriesResponse(RaftRPCMessage):
@@ -28,6 +37,8 @@ class AppendEntriesResponse(RaftRPCMessage):
 class RequestVote(RaftRPCMessage):
     raft_type: RaftRPCType = RaftRPCType.REQUESTVOTE
     term: int
+    lastLogIndex: int
+    lastLogTerm: int
 
 
 class RequestVoteResponse(RaftRPCMessage):
