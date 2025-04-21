@@ -6,9 +6,9 @@ import json
 class RaftState:
     def __init__(self, this: NetworkMember):
         self._this = this
-        self._leader_id: Any = None
         self._voted_for: str = None
         self._current_term: int = 0
+        self._log: list[dict] = []
         self._load()
 
 
@@ -34,16 +34,6 @@ class RaftState:
     def current_term(self, value: int):
         self._current_term = value
         self._dump()
-
-
-    @property
-    def leader_id(self) -> int:
-        return self._leader_id
-
-
-    @leader_id.setter
-    def leader_id(self, value: Any):
-        self.leader_id = value
 
     
     def _load(self):

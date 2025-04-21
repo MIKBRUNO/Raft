@@ -1,19 +1,20 @@
+from typing import Callable, Awaitable
+
+from statemachine import State, StateMachine
+
+import asyncio
+
+import logging
+
+from pydantic import ValidationError
+
+from .raft_models import AppendEntries, AppendEntriesResponse, RequestVote, RequestVoteResponse, RaftRPCMessage, RaftRPCType
 from .raft_state import RaftState
 from .networking import Network, NetworkMember
 from .rpc import RPCManager, RPCCallable, RPCTerminatedException
-from typing import Callable, Awaitable
-from statemachine import State, StateMachine
-from enum import Enum
-import asyncio
-import logging
 
 
 __logger__ = logging.getLogger(__name__)
-
-
-class RaftRPCTypes(Enum):
-    APPENDENTRIES = 0
-    REQUESTVOTE = 1
 
 
 class ElectionCompleteException(BaseException):
@@ -125,16 +126,17 @@ class RaftObject(StateMachine):
 
     async def _request_vote(self, rpc: RPCCallable) -> bool:
         __logger__.debug(f"call RequestVote({rpc}, {self._state.current_term})")
-        result = await rpc.call({"type": RaftRPCTypes.REQUESTVOTE.name, "term": self._state.current_term})
+        result = await rpc.call(RequestVote(term=self._state.current_term))
         __logger__.debug(f"recv {result}")
         if not result:
             return False
         try:
-            term = result["term"]
-            if term > self._state.current_term:
-                self.higher_term(term)
-            return result["voteGranted"]
-        except KeyError:
+            response = RequestVoteResponse.model_validate(result)
+            if response.term > self._state.current_term:
+                self.higher_term(response.term)
+            return response.voteGranted
+        except ValidationError as e:
+            __logger__.error(e)
             return False
 
 
@@ -169,57 +171,60 @@ class RaftObject(StateMachine):
     async def _append_entries(self, rpc: RPCCallable):
         while True:
             __logger__.debug(f"call AppendEntries({rpc}, {self._state.current_term})")
-            result = await rpc.call({"type": RaftRPCTypes.APPENDENTRIES.name, "term": self._state.current_term})
+            result = await rpc.call(AppendEntries(term=self._state.current_term))
             __logger__.debug(f"recv {result}")
             try:
                 if result:
-                    term = result["term"]
-                    if term > self._state.current_term:
-                        self.higher_term(term)
-            except KeyError:
-                pass
+                    response = AppendEntriesResponse.model_validate(result)
+                    if response.term > self._state.current_term:
+                        self.higher_term(response.term)
+            except ValidationError as e:
+                __logger__.error(e)
             await asyncio.sleep(self._heartbeat_policy())
 
     
-    async def _handle_rpc_call(self, member: NetworkMember, args: dict) -> dict | None:
+    async def _handle_rpc_call(self, member: NetworkMember, args: dict) -> AppendEntriesResponse | RequestVoteResponse:
         try:
-            rpc_type = RaftRPCTypes[args["type"]]
-            if rpc_type == RaftRPCTypes.APPENDENTRIES:
-                return await self._handle_append_entries(member, args["term"])
-            elif rpc_type == RaftRPCTypes.REQUESTVOTE:
-                return await self._handle_request_vote(member, args["term"])
-        except KeyError:
+            msg = RaftRPCMessage.model_validate(args)
+            if msg.raft_type == RaftRPCType.APPENDENTRIES:
+                append_entries = AppendEntries.model_validate(args)
+                return await self._handle_append_entries(member, append_entries)
+            elif msg.raft_type == RaftRPCType.REQUESTVOTE:
+                requets_vote = RequestVote.model_validate(args)
+                return await self._handle_request_vote(member, requets_vote)
+        except ValidationError as e:
+            __logger__.error(e)
             return None
 
     
-    async def _handle_append_entries(self, member: NetworkMember, term: int) -> dict | None:
-        answer = lambda success: {"term": self._state.current_term, "success": success}
-        __logger__.debug(f"recv AppendEntries({member.id}, {term})")
+    async def _handle_append_entries(self, member: NetworkMember, command: AppendEntries) -> AppendEntriesResponse | None:
+        answer = lambda success: AppendEntriesResponse(term=self._state.current_term, success=success)
+        __logger__.debug(f"recv AppendEntries({member.id}, {command.term})")
         if self.current_state is not self.leader:
             self._reset_election_timeout()
-        if self._state.current_term > term:
+        if self._state.current_term > command.term:
             return answer(False)
-        if self._state.current_term < term:
-            self._state.current_term = term
+        if self._state.current_term < command.term:
+            self._state.current_term = command.term
             self._state.voted_for = None
-            self.higher_term(term)
-        if self._state.current_term == term:
+            self.higher_term(command.term)
+        if self._state.current_term == command.term:
             self.new_leader()
         ... # redirect pending user requests
         return answer(True)
 
 
-    async def _handle_request_vote(self, member: NetworkMember, term: int) -> dict | None:
-        answer = lambda success: {"term": self._state.current_term, "voteGranted": success}
-        __logger__.debug(f"recv RequestVote({member.id}, {term})")
+    async def _handle_request_vote(self, member: NetworkMember, command: RequestVote) -> RequestVoteResponse | None:
+        answer = lambda success: RequestVoteResponse(term=self._state.current_term, voteGranted=success)
+        __logger__.debug(f"recv RequestVote({member.id}, {command.term})")
         if self.current_state is not self.leader:
             self._reset_election_timeout()
-        if self._state.current_term > term:
+        if self._state.current_term > command.term:
             return answer(False)
-        if self._state.current_term < term:
-            self._state.current_term = term
+        if self._state.current_term < command.term:
+            self._state.current_term = command.term
             self._state.voted_for = None
-            self.higher_term(term)
+            self.higher_term(command.term)
         if self._state.voted_for is None or member.id == self._state.voted_for:
             self._state.voted_for = member.id
             return answer(True)
