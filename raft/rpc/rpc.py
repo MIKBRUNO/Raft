@@ -12,7 +12,7 @@ from .rpc_scheme import RPCMessage, RPCType
 
 
 __logger__ = logging.getLogger(__name__)
-__logger__.setLevel(logging.ERROR)
+__logger__.setLevel(logging.WARNING)
 
 
 class RPCTerminatedException(BaseException):
@@ -79,6 +79,7 @@ class RPCManager:
 
     async def listen(self, handler: Callable[[NetworkMember, dict], Awaitable[BaseModel] | BaseModel]):
         m, d, q = await self._q.get()
+        self._q.task_done()
         r = None
         try:
             if asyncio.iscoroutinefunction(handler):
@@ -126,6 +127,7 @@ class RPCManager:
             q = asyncio.Queue[BaseModel | None]()
             await self._q.put((member, msg.data, q))
             result = await q.get()
+            q.task_done()
             if result:
                 __logger__.debug(f"Send RESPONSE {RPCMessage(rpc_type=RPCType.RESPONSE, id=msg.id, data=result)}")
                 await self._network.send(member, RPCMessage(rpc_type=RPCType.RESPONSE, id=msg.id, data=result).dump_bytes())

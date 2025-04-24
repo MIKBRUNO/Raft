@@ -8,13 +8,30 @@ import logging
 
 from pydantic import ValidationError
 
-from .raft_models import AppendEntries, AppendEntriesResponse, RequestVote, RequestVoteResponse, RaftRPCMessage, RaftRPCType
+from abc import ABC, abstractmethod
+
+from .raft_models import (
+    AppendEntries,
+    AppendEntriesResponse,
+    RequestVote,
+    RequestVoteResponse,
+    RaftRPCMessage,
+    RaftRPCType,
+    RaftLogItem,
+    ClientCall,
+    ClientCallResponse
+)
 from .raft_state import RaftState
 from .networking import Network, NetworkMember
 from .rpc import RPCManager, RPCCallable, RPCTerminatedException
 
 
 __logger__ = logging.getLogger(__name__)
+
+
+class RaftSM(ABC):
+    @abstractmethod
+    def apply_commands(commands: list[RaftLogItem]): ...
 
 
 class ElectionCompleteException(BaseException):
@@ -40,8 +57,12 @@ class RaftObject(StateMachine):
                  heartbeat_policy: Callable[[], float] | None = None,
                  retry_rpc_policy: Callable[[], float] | None = None):
         super().__init__(allow_event_without_transition=True)
+        self._client_queue: asyncio.Queue[dict] = asyncio.Queue()
+        self._sm: RaftSM | None = None
+        self._match_indecies: dict[str, int] = dict()
         self._network = network
         self._members = {m.id: m for m in self._network.members}
+        self._quorum = (len(self._members) + 1) // 2 + 1
         self._rpcm = RPCManager(network, retry_policy=retry_rpc_policy)
         self._state = RaftState(self._network.this)
         self._heartbeat_policy = heartbeat_policy if heartbeat_policy else lambda: 0
@@ -49,6 +70,22 @@ class RaftObject(StateMachine):
         self._election_timeout: asyncio.Timeout | None = None
         self._running_task: asyncio.Task | None = None
         self._new_task: asyncio.Task | None = None
+
+
+    def set_raft_sm(self, sm: RaftSM):
+        self._sm = sm
+
+
+    async def add_log_item(self, command: dict):
+        await self._client_queue.put(command)
+
+    
+    def _update_sm(self):
+        last_applied = self._state.last_applied
+        commit_index = self._state.commit_index
+        if self._sm and commit_index > last_applied:
+            self._state.last_applied = commit_index
+            self._sm.apply_commands(self._state.log[last_applied + 1:commit_index + 1])
 
 
     async def _run_wrapper(self, aw: Awaitable):
@@ -75,7 +112,7 @@ class RaftObject(StateMachine):
         self._start_role(self._run_leader())        
 
 
-    async def _listen_forever(self):
+    async def _listen_rpc(self):
         while True:
             await self._rpcm.listen(self._handle_rpc_call)
 
@@ -89,7 +126,7 @@ class RaftObject(StateMachine):
         try:
             async with asyncio.timeout(self._election_timeout_policy()) as t:
                 self._election_timeout = t
-                await self._listen_forever()
+                await self._listen_rpc()
         except asyncio.TimeoutError:
             self._election_timeout = None
             self.election_timeout()
@@ -105,7 +142,7 @@ class RaftObject(StateMachine):
                 self._election_timeout = t
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(self._run_election())
-                    tg.create_task(self._listen_forever())
+                    tg.create_task(self._listen_rpc())
         except asyncio.TimeoutError:
             self._election_timeout = None
             await self.election_timeout()
@@ -117,7 +154,8 @@ class RaftObject(StateMachine):
         rpcs = [self._rpcm.get_rcp_endpoint(m) for m in self._members.values()]
         try:
             async with asyncio.TaskGroup() as tg:
-                tg.create_task(self._listen_forever())
+                tg.create_task(self._listen_rpc())
+                tg.create_task(self._listen_client())
                 for r in rpcs:
                     tg.create_task(self._append_entries(r))
         except* RPCTerminatedException:
@@ -125,8 +163,10 @@ class RaftObject(StateMachine):
 
 
     async def _request_vote(self, rpc: RPCCallable) -> bool:
-        __logger__.debug(f"call RequestVote({rpc}, {self._state.current_term})")
-        result = await rpc.call(RequestVote(term=self._state.current_term))
+        log = self._state.log
+        request = RequestVote(term=self._state.current_term, lastLogIndex=last_index(log), lastLogTerm=last_term(log))
+        __logger__.debug(f"call RequestVote({rpc}, {request})")
+        result = await rpc.call(request)
         __logger__.debug(f"recv {result}")
         if not result:
             return False
@@ -141,8 +181,7 @@ class RaftObject(StateMachine):
 
 
     async def _run_election(self):
-        quorum = len(self._members) // 2 + 1
-        __logger__.debug(f"Started election with {quorum} quorum on {self._state.current_term} term")
+        __logger__.debug(f"Started election with {self._quorum} quorum on {self._state.current_term} term")
         votes = 1
         rpcs = [self._rpcm.get_rcp_endpoint(m) for m in self._members.values()]
         terminated = False
@@ -154,7 +193,7 @@ class RaftObject(StateMachine):
                         return
                     votes += 1
                     __logger__.debug(f"{votes} votes")
-                    if votes >= quorum:
+                    if votes >= self._quorum:
                         raise ElectionCompleteException()
                 for r in rpcs:
                     tg.create_task(request(r))
@@ -164,20 +203,57 @@ class RaftObject(StateMachine):
             terminated = True
         if terminated:
             return
-        if votes >= quorum:
+        if votes >= self._quorum:
             self.win_election()
 
 
-    async def _append_entries(self, rpc: RPCCallable):
+    async def _listen_client(self):
         while True:
-            __logger__.debug(f"call AppendEntries({rpc}, {self._state.current_term})")
-            result = await rpc.call(AppendEntries(term=self._state.current_term))
+            cmd = await self._client_queue.get()
+            self._client_queue.task_done()
+            log = self._state.log
+            log.append(RaftLogItem(term=self._state.current_term, command=cmd))
+            self._state.log = log
+
+
+    async def _try_commit(self):
+        log = self._state.log
+        matches = list(self._match_indecies.values()) + [last_index(log)]
+        commit_index = self._state.commit_index
+        for i in range(commit_index + 1, max(matches) + 1):
+            if len([m for m in matches if m >= i]) >= self._quorum:
+                commit_index = commit_index + 1
+        self._state.commit_index = commit_index
+        self._update_sm()
+
+    async def _append_entries(self, rpc: RPCCallable):
+        next_index = len(self._state.log)
+        self._match_indecies[rpc.id] = -1
+        while True:
+            log = self._state.log
+            items = log[next_index:]
+            request = AppendEntries(
+                term=self._state.current_term,
+                prevLogIndex=next_index - 1,
+                prevLogTerm=last_term(log, next_index),
+                entries=items,
+                leaderCommit=self._state.commit_index
+            )
+            __logger__.debug(f"call AppendEntries({rpc}, {request})")
+            result = await rpc.call(request)
             __logger__.debug(f"recv {result}")
             try:
                 if result:
                     response = AppendEntriesResponse.model_validate(result)
                     if response.term > self._state.current_term:
                         self.higher_term(response.term)
+                    if response.success:
+                        self._match_indecies[rpc.id] = last_index(log)
+                        next_index = len(log)
+                        await self._try_commit()
+                    else:
+                        next_index = next_index - 1
+                        continue
             except ValidationError as e:
                 __logger__.error(e)
             await asyncio.sleep(self._heartbeat_policy())
@@ -192,14 +268,17 @@ class RaftObject(StateMachine):
             elif msg.raft_type == RaftRPCType.REQUESTVOTE:
                 requets_vote = RequestVote.model_validate(args)
                 return await self._handle_request_vote(member, requets_vote)
+            elif msg.raft_type == RaftRPCType.CLIENTCALL:
+                client_call = ClientCall.model_validate(args)
+                return await self._handle_client_call(member, client_call)
         except ValidationError as e:
             __logger__.error(e)
             return None
 
     
-    async def _handle_append_entries(self, member: NetworkMember, command: AppendEntries) -> AppendEntriesResponse | None:
+    async def _handle_append_entries(self, member: NetworkMember, command: AppendEntries) -> AppendEntriesResponse:
         answer = lambda success: AppendEntriesResponse(term=self._state.current_term, success=success)
-        __logger__.debug(f"recv AppendEntries({member.id}, {command.term})")
+        __logger__.debug(f"recv {command}")
         if self.current_state is not self.leader:
             self._reset_election_timeout()
         if self._state.current_term > command.term:
@@ -211,21 +290,26 @@ class RaftObject(StateMachine):
         if self._state.current_term == command.term:
             self.new_leader()
         log = self._state.log
-        if len(log) <= command.prevLogIndex or log[command.prevLogIndex].term != command.prevLogTerm:
+        if command.prevLogIndex != -1 and (len(log) <= command.prevLogIndex or log[command.prevLogIndex].term != command.prevLogTerm):
             return answer(False)
         log = log[:command.prevLogIndex + 1]
         log.extend(command.entries)
         self._state.log = log
         if command.leaderCommit > self._state.commit_index:
-            self._state.commit_index = min(command.leaderCommit, len(log) - 1)
-            ... # update external state machine (last_applied = commitIndex and apply command)
-        ... # redirect pending user requests
+            self._state.commit_index = min(command.leaderCommit, last_index(log))
+            self._update_sm()
+        if self._client_queue.qsize() > 0:
+            cmd = await self._client_queue.get()
+            self._client_queue.task_done()
+            request = ClientCall(command=cmd)
+            __logger__.debug(f"call ClientCall({member}, {request})")
+            asyncio.create_task(self._rpcm.call(member, request))
         return answer(True)
 
 
-    async def _handle_request_vote(self, member: NetworkMember, command: RequestVote) -> RequestVoteResponse | None:
+    async def _handle_request_vote(self, member: NetworkMember, command: RequestVote) -> RequestVoteResponse:
         answer = lambda success: RequestVoteResponse(term=self._state.current_term, voteGranted=success)
-        __logger__.debug(f"recv RequestVote({member.id}, {command.term})")
+        __logger__.debug(f"recv {command}")
         if self.current_state is not self.leader:
             self._reset_election_timeout()
         if self._state.current_term > command.term:
@@ -236,8 +320,26 @@ class RaftObject(StateMachine):
             self.higher_term(command.term)
         log = self._state.log
         if (self._state.voted_for is None or member.id == self._state.voted_for) \
-            and command.lastLogIndex >= len(log) - 1 \
-            and command.lastLogTerm >= log[-1].term:
+            and command.lastLogIndex >= last_index(log) \
+            and command.lastLogTerm >= last_term(log):
             self._state.voted_for = member.id
             return answer(True)
         return answer(False)
+
+
+    async def _handle_client_call(self, member: NetworkMember, command: ClientCall) -> ClientCallResponse:
+        answer = ClientCallResponse()
+        __logger__.debug(f"recv {command}")
+        await self._client_queue.put(command.command)
+        return answer
+
+
+def last_index(log: list[RaftLogItem]):
+    return len(log) - 1
+
+
+def last_term(log: list[RaftLogItem], pos: int = 0):
+    if len(log) == 0:
+        return -1
+    else:
+        return log[pos - 1].term

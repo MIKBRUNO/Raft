@@ -11,6 +11,7 @@ class RaftLogItem(BaseModel):
 class RaftRPCType(Enum):
     APPENDENTRIES = 'APPENDENTRIES'
     REQUESTVOTE = 'REQUESTVOTE'
+    CLIENTCALL = 'CLIENTCALL'
 
 
 class RaftRPCMessage(BaseModel):
@@ -45,3 +46,12 @@ class RequestVoteResponse(RaftRPCMessage):
     raft_type: RaftRPCType = RaftRPCType.REQUESTVOTE
     term: int
     voteGranted: bool
+
+
+class ClientCall(RaftRPCMessage):
+    raft_type: RaftRPCType = RaftRPCType.CLIENTCALL
+    command: dict
+
+
+class ClientCallResponse(RaftRPCMessage):
+    raft_type: RaftRPCType = RaftRPCType.CLIENTCALL

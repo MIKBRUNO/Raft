@@ -14,9 +14,9 @@ async def connect_stdin_stdout():
     writer = asyncio.StreamWriter(w_transport, w_protocol, reader, loop)
     return reader, writer
 
-n = 5
+n = 3
 
-members = [TcpMember(address=('127.0.0.1', 4000 + i)) for i in range(n + 1)]
+members = [TcpMember(address=('127.0.0.1', 4000 + i)) for i in range(n)]
 i = input(f"1-{n}: ")
 this = TcpMember(address=('127.0.0.1', 4000 + int(i)))
 members.remove(this)

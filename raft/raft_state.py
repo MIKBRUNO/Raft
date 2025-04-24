@@ -16,8 +16,8 @@ class RaftState:
     def __init__(self, this: NetworkMember):
         self._this = this
         self._model = _RaftStateModel()
-        self._commit_index: int = 0
-        self._last_applied: int = 0
+        self._commit_index: int = -1
+        self._last_applied: int = -1
         self._load()
 
 
@@ -77,6 +77,7 @@ class RaftState:
 
     
     def _load(self):
+        # return
         try:
             with open(f"{self._this.id}.json", "tr") as f:
                 state = _RaftStateModel.model_validate_json(f.read())
@@ -86,6 +87,7 @@ class RaftState:
 
     
     def _dump(self):
+        # return
         with open(f"{self._this.id}.json", "tw") as f:
             data = self._model.model_dump_json()
             f.write(data)
